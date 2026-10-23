@@ -235,6 +235,45 @@ using OrderedCollections
         @test doc["a"] == "new_a"
         doc.a = "even_newer_a"
         @test doc["a"] == "even_newer_a"
+
+        # a value that cannot be encoded must not destroy the document
+        d = Mongoc.BSON("a" => Int32(1), "b" => "keep")
+        @test_throws MethodError d.a = big(2)
+        @test d["a"] == 1 && d["b"] == "keep" && length(d) == 2
+
+        # unique keys: value is replaced in place, other elements (even undecodable ones) survive
+        d = Mongoc.BSON("a" => Int32(1), "b" => Mongoc.BSON("x" => [1, 2]), "c" => "z")
+        d.b = "new"
+        @test collect(keys(d)) == ["a", "b", "c"]
+        @test d.a == 1 && d.b == "new" && d.c == "z"
+        d.c = Mongoc.BSON("y" => 1)
+        @test d.c == Dict("y" => 1) && d.a == 1
+
+        # duplicate keys collapse to the last value at the position of the first occurrence
+        d = Mongoc.BSON("a" => Int32(1), "b" => "x")
+        d["a"] = Int32(2)
+        d.b = "y"
+        @test collect(keys(d)) == ["a", "b"]
+        @test d.a == 2 && d.b == "y"
+
+        # merge! collapses duplicates without decoding, keeping the last value at the first position
+        d = Mongoc.BSON("a" => Int32(1), "b" => "x")
+        d["a"] = Int32(2)
+        merge!(d)
+        @test collect(keys(d)) == ["a", "b"] && d["a"] == 2 && d["b"] == "x"
+        @test merge!(d) === d
+
+        # only the handle property accepts a native pointer
+        d = Mongoc.BSON("a" => Int32(1))
+        h = Mongoc.handle(d)
+        @test_throws MethodError d.unrelated = C_NULL
+        @test Mongoc.handle(d) == h
+
+        # Boolean masks select by value
+        d = Mongoc.BSON("a" => Int32(1), "b" => Int32(2))
+        @test d[[false, true]] == [2]
+        @test d[[2, 1]] == [2, 1]
+        @test_throws DimensionMismatch d[[true]]
     end
 
     @testset "BSON write" begin

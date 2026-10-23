@@ -1101,37 +1101,62 @@ function Base.getindex(document::BSON, index::AbstractVector, dicttype::Type{D} 
     v_iter = values(document)
     n = Int(length(v_iter))
     iter_ref = v_iter.bson_iter_ref
+    if eltype(index) === Bool
+        # Boolean masks select by value, not by position
+        length(index) == n || throw(DimensionMismatch("mask of length $(length(index)) does not match document of length $n"))
+        index = findall(index)
+    end
+    wanted = Set(index)
     i = 0
     vv = Vector{Any}(undef, n)
     while(bson_iter_next(iter_ref))
         i += 1
-        if i ∈ index
+        if i ∈ wanted
             vv[i] = get_value(iter_ref; dicttype = D)
         end
     end
     vv[index]
 end
 
-function Base.merge!(document::BSON)
-    kk_all = collect(keys(document))
-    n = length(kk_all)
-
-    index_dict = OrderedDict{String, Int}()
-    for (i, k) in enumerate(kk_all)
-        index_dict[k] = i   # always overwrite → keeps the last index
-    end
-
-    kk = collect(keys(index_dict))
-    index = collect(values(index_dict))
-    length(kk) == n && return document
-
-    iter_ref = keys(document).bson_iter_ref
-    vv = document[index]
-    bson_reinit(document)
-    for (k, v) in zip(kk, vv)
-        document[k] = v
-    end
+# Make `document` take over the contents of `replacement` by swapping native handles.
+# `replacement` is left owning the old handle and will free it when finalized.
+function swap_handles!(document::BSON, replacement::BSON)
+    old = handle(document)
+    setfield!(document, :handle, handle(replacement))
+    setfield!(replacement, :handle, old)
     document
+end
+
+# Build a new document from `document` by copying its elements as raw bytes, without decoding.
+# Duplicate keys collapse to their last value at the position of their first occurrence.
+# If `replaced_key` is given, the element for that key is taken from `replaced_iter_ref` instead.
+function collapse_duplicates(document::BSON, replaced_key::Union{String, Nothing} = nothing,
+        replaced_iter_ref::Union{Ref{BSONIter}, Nothing} = nothing)
+    # Remember the last element of each key (copying a BSONIter yields an iterator positioned
+    # at the same element) and the order of first occurrence.
+    order = String[]
+    last = Dict{String, Ref{BSONIter}}()
+    result = BSON()
+    iter_ref = Ref{BSONIter}()
+    GC.@preserve document begin
+        bson_iter_init(iter_ref, handle(document))
+        while bson_iter_next(iter_ref)
+            k = unsafe_string(bson_iter_key(iter_ref))
+            haskey(last, k) || push!(order, k)
+            last[k] = Ref(iter_ref[])
+        end
+        for k in order
+            src_iter_ref = k == replaced_key ? replaced_iter_ref : last[k]
+            bson_append_iter(handle(result), src_iter_ref) || error("Couldn't copy element of BSON document.")
+        end
+    end
+    result
+end
+
+function Base.merge!(document::BSON)
+    allunique(keys(document)) && return document
+    # the result is built aside, so that `document` is untouched on failure
+    swap_handles!(document, collapse_duplicates(document))
 end
 
 function Base.getindex(document::BSON, key::Symbol, @nospecialize dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict
@@ -1156,27 +1181,16 @@ function Base.setindex!(document::BSON, value, key::Symbol)
     key_exists = bson_iter_init_find(iter_ref, handle(document), k_str)
 
     if key_exists
-        # append something inexpensive to parse as dummy value
-        document[k_str] = 0
-        kk_all = collect(keys(document))
-        n = length(kk_all)
-        
-        index_dict = OrderedDict{String, Int}()
-        for (i, k) in enumerate(kk_all)
-            index_dict[k] = i   # always overwrite → keeps the last index
-        end
-        
-        kk = collect(keys(index_dict))
-        index = collect(values(index_dict))
-        k_pos = findfirst(==(k_str), kk)
-        
-        vv = document[index]
-        # replace the dummy value by the real value
-        vv[k_pos] = value
-        bson_reinit(document)
-        for (k, v) in zip(kk, vv)
-            document[k] = k == k_str ? value : v
-        end
+        # encoding the value into a scratch document validates it before `document` is touched
+        replacement = BSON()
+        replacement[k_str] = value
+        new_iter_ref = Ref{BSONIter}()
+        bson_iter_init(new_iter_ref, handle(replacement))
+        bson_iter_next(new_iter_ref)
+
+        # only a failing raw copy can still throw here, and `document` is not modified until the swap
+        result = collapse_duplicates(document, k_str, new_iter_ref)
+        swap_handles!(document, result)
         value
     else
         document[k_str] = value
@@ -1196,7 +1210,9 @@ function Base.setproperty!(document::BSON, key::Symbol, value)
     document[key] = value
 end
 
+# compatibility path for the deprecated `document.handle = ptr` syntax
 function Base.setproperty!(document::BSON, key::Symbol, value::Ptr{Nothing})
+    key === :handle || return document[key] = value
     setfield!(document, :handle, value)
 end
 
