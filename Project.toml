@@ -17,7 +17,7 @@ Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 DecFP = "1"
 Libdl = "1"
 MongoC_jll = "1"
-OrderedCollections = "1"
+OrderedCollections = "1, 2"
 julia = "1.6"
 
 [extras]
