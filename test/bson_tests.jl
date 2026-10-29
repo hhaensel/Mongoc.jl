@@ -173,6 +173,8 @@ using OrderedCollections
         @test doc["array"] == [1, 2, false, "inner_string"]
         @test doc["document"] == Dict("a"=>1, "b"=>"b_string")
         @test doc["document", OrderedDict] == OrderedDict("a"=>1, "b"=>"b_string")
+        @test doc["document", OrderedDict{String,Any}] isa OrderedDict{String,Any}
+        @test doc["document", OrderedDict{String,Any}] == OrderedDict("a"=>1, "b"=>"b_string")
         @test doc["null"] == nothing
 
         @test_throws KeyError doc["invalid key"]
@@ -663,4 +665,29 @@ using OrderedCollections
             @test bson["a"] == 1
         end
     end
+end
+
+@testset "Nested dicttype" begin
+    nested = Mongoc.BSON("n" => Mongoc.BSON("m" => Mongoc.BSON("k" => 1)),
+                         "arr" => [Mongoc.BSON("x" => Mongoc.BSON("y" => 2))])
+
+    for D in (Dict, OrderedDict)
+        d = Mongoc.as_dict(nested; dicttype = D)
+        @test d isa D{String, Any}
+        @test d["n"] isa D{String, Any}
+        @test d["n"]["m"] isa D{String, Any}
+        @test d["arr"][1] isa D{String, Any}
+        @test d["arr"][1]["x"] isa D{String, Any}
+    end
+
+    d = Mongoc.as_dict(nested; dicttype = OrderedDict{String,Any})
+    @test d isa OrderedDict{String,Any}
+    @test d["n"]["m"] isa OrderedDict{String,Any}
+
+    v = nested["n", OrderedDict{String,Any}]
+    @test v isa OrderedDict{String,Any}
+    @test v["m"] isa OrderedDict{String,Any}
+    @test nested[:n, OrderedDict{String,Any}]["m"] isa OrderedDict{String,Any}
+    @test nested["arr", OrderedDict{String,Any}][1]["x"] isa OrderedDict{String,Any}
+    @test nested[1:2, OrderedDict{String,Any}][1]["m"] isa OrderedDict{String,Any}
 end

@@ -516,12 +516,22 @@ Base.values(doc::BSON) = BSONIterator(doc, IterateValues)
 
 Converts a BSON document to a given dicttype, defaulting to DEFAULT_DICT_TYPE (OrderedDict)
 """
-as_dict(document::BSON; @nospecialize dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict = convert(D, document)
+as_dict(document::BSON; dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict =
+    as_dict(bson_iter_init(document), D)
 
-function as_dict(iter_ref::Ref{BSONIter}; @nospecialize dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict
-    result = D{String, Any}()
+# `dicttype` may be an unparameterized type such as `Dict` (which becomes `Dict{String, Any}`)
+# or a fully parameterized one such as `OrderedDict{String, Any}`.
+_new_dict(::Type{D}) where D <: AbstractDict =
+    D isa UnionAll ? Base.typename(D).wrapper{String, Any}() : D()
+
+as_dict(iter_ref::Ref{BSONIter}; dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict =
+    as_dict(iter_ref, D)
+
+# The dict type is passed positionally internally, which is considerably faster than a keyword argument.
+function as_dict(iter_ref::Ref{BSONIter}, ::Type{D}) where D <: AbstractDict
+    result = _new_dict(D)
     while bson_iter_next(iter_ref)
-        result[unsafe_string(bson_iter_key(iter_ref))] = get_value(iter_ref; dicttype)
+        result[unsafe_string(bson_iter_key(iter_ref))] = get_value(iter_ref, D)
     end
     return result
 end
@@ -546,7 +556,10 @@ function get_array(document::BSON, key::AbstractString, ::Type{T}) where T
     return get_array(iter_ref, T)
 end
 
-function get_array(iter_ref::Ref{BSONIter}, ::Type{T}) where T
+get_array(iter_ref::Ref{BSONIter}, ::Type{T}; dicttype::Type{D} = DEFAULT_DICT_TYPE) where {T, D <: AbstractDict} =
+    get_array(iter_ref, T, D)
+
+function get_array(iter_ref::Ref{BSONIter}, ::Type{T}, ::Type{D}) where {T, D <: AbstractDict}
     bson_type = bson_iter_type(iter_ref)
     @assert bson_type == BSON_TYPE_ARRAY
     child_iter_ref = Ref{BSONIter}()
@@ -556,12 +569,15 @@ function get_array(iter_ref::Ref{BSONIter}, ::Type{T}) where T
     end
     result_array = Vector{T}()
     while bson_iter_next(child_iter_ref)
-        push!(result_array, get_value(child_iter_ref))
+        push!(result_array, get_value(child_iter_ref, D))
     end
     return result_array
 end
 
-function get_value(iter_ref::Ref{BSONIter}; @nospecialize dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict
+get_value(iter_ref::Ref{BSONIter}; dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict =
+    get_value(iter_ref, D)
+
+function get_value(iter_ref::Ref{BSONIter}, ::Type{D}) where D <: AbstractDict
     bson_type = bson_iter_type(iter_ref)
 
     if bson_type == BSON_TYPE_UTF8
@@ -585,7 +601,7 @@ function get_value(iter_ref::Ref{BSONIter}; @nospecialize dicttype::Type{D} = DE
     elseif bson_type == BSON_TYPE_TIMESTAMP
         return bson_iter_timestamp(iter_ref)
     elseif bson_type == BSON_TYPE_ARRAY
-        return get_array(iter_ref, Any)
+        return get_array(iter_ref, Any, D)
     elseif bson_type == BSON_TYPE_DOCUMENT
 
         child_iter_ref = Ref{BSONIter}()
@@ -593,7 +609,7 @@ function get_value(iter_ref::Ref{BSONIter}; @nospecialize dicttype::Type{D} = DE
         if !ok
             error("Couldn't iterate document inside BSON.")
         end
-        return as_dict(child_iter_ref; dicttype)
+        return as_dict(child_iter_ref, D)
 
     elseif bson_type == BSON_TYPE_BINARY
 
@@ -621,10 +637,10 @@ function get_value(iter_ref::Ref{BSONIter}; @nospecialize dicttype::Type{D} = DE
     end
 end
 
-function Base.getindex(document::BSON, key::AbstractString, @nospecialize dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict
+function Base.getindex(document::BSON, key::AbstractString, dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict
     iter_ref = Ref{BSONIter}()
     bson_iter_init_find(iter_ref, handle(document), key) || throw(KeyError(key))
-    return get_value(iter_ref; dicttype = D)
+    return get_value(iter_ref, D)
 end
 
 function Base.get(document::BSON, key::AbstractString, default::Any)
@@ -1117,7 +1133,7 @@ function Base.getindex(document::BSON, index::AbstractVector, dicttype::Type{D} 
     while(bson_iter_next(iter_ref))
         i += 1
         if i ∈ wanted
-            vv[i] = get_value(iter_ref; dicttype = D)
+            vv[i] = get_value(iter_ref, D)
         end
     end
     vv[index]
@@ -1164,7 +1180,7 @@ function Base.merge!(document::BSON)
     swap_handles!(document, collapse_duplicates(document))
 end
 
-function Base.getindex(document::BSON, key::Symbol, @nospecialize dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict
+function Base.getindex(document::BSON, key::Symbol, dicttype::Type{D} = DEFAULT_DICT_TYPE) where D <: AbstractDict
     k = String(key)
     iter_ref = keys(document).bson_iter_ref
     i = 0
@@ -1177,7 +1193,7 @@ function Base.getindex(document::BSON, key::Symbol, @nospecialize dicttype::Type
     for _ in 1:i
         bson_iter_find(iter_ref, k)
     end
-    return get_value(iter_ref; dicttype = D)
+    return get_value(iter_ref, D)
 end
 
 function Base.setindex!(document::BSON, value, key::Symbol)
